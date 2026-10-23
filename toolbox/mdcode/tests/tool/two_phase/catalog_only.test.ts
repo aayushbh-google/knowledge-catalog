@@ -21,78 +21,108 @@ const PLAN = ['-- Knowledge Catalog --', 'PLAN LINE'];
 const planned = (result = {}) =>
     ({preflight: {result: kcResult({plan: ['PLAN LINE'], ...result})}});
 
-scenarios('push --no-deployment', [
-  {
-    name: '--no-deployment passes the catalog a deployment that names a profile file, with that profile attached, and both files as copies',
-    deployments: [{name: 'g', profile: 'prod'}],
-    profiles: {prod: PROD},
-    flags: {validateOnly: true},
-    code: 0, log: [msg.VALIDATED],
-    called: {preflight: 1, sources: 0, query: 0},
-    check: r => {
-      expect(r.published.deployments?.map(d => [d.name, d.profile]))
-          .toEqual([['g', 'prod']]);
-      expect(r.published.profiles?.map(p => p.name)).toEqual(['prod']);
-      expect(r.fake.preflight.mock.calls[0][2].sourceFiles.map(
-                 (f: any) => f.fileName))
-          .toEqual(['commerce.yaml', 'commerce.profile.prod.yaml']);
-    },
-  },
-  {
-    name: '--no-deployment publishes to Knowledge Catalog, printing the preflight\'s warnings, and deploys nothing, also when only the deployment\'s profile gives a join its columns',
-    deployments: ['g1', 'g2'],
-    // cac gives `profile: true` when --profile is absent.
-    flags: {profile: true},
-    services: {preflight: {prepared: {...PREPARED, warnings: ['w']}}},
-    code: 0,
-    events: ['preflight', 'apply'],
-    called: {bq: 0, spanner: 0, sources: 0},
-    warnings: ['Warning: w'],
-    then: [{
-      deployments: [{name: 'g1', profile: 'prod'}],
-      entities: [CUSTOMER, {...CUSTOMER, name: 'Order', source: bqTable('o')}],
-      relationships: [{name: 'refers', from: 'Order', to: 'Customer'}],
-      profiles: {prod: {
-        entities: {...PROD.entities, Order: bqTable('o', 'prod')},
-        relationships: [
-          {name: 'refers', from_columns: ['key'], to_columns: ['key']},
+scenarios(
+    'push --no-deployment',
+    [
+      {
+        name:
+            '--no-deployment passes the catalog a deployment that names a profile file, with that profile attached, and both files as copies',
+        deployments: [{name: 'g', profile: 'prod'}],
+        profiles: {prod: PROD},
+        flags: {validateOnly: true},
+        code: 0,
+        log: [msg.VALIDATED],
+        called: {preflight: 1, sources: 0, query: 0},
+        check: r => {
+          expect(r.published.deployments?.map(d => [d.name, d.profile]))
+              .toEqual([['g', 'prod']]);
+          expect(r.published.profiles?.map(p => p.name)).toEqual(['prod']);
+          expect(r.fake.preflight.mock.calls[0][2].sourceFiles.map(
+                     (f: any) => f.fileName))
+              .toEqual(['commerce.yaml', 'commerce.profile.prod.yaml']);
+        },
+      },
+      {
+        name:
+            '--no-deployment publishes to Knowledge Catalog, printing the preflight\'s warnings, and deploys nothing, also when only the deployment\'s profile gives a join its columns',
+        deployments: ['g1', 'g2'],
+        // cac gives `profile: true` when --profile is absent.
+        flags: {profile: true},
+        services: {preflight: {prepared: {...PREPARED, warnings: ['w']}}},
+        code: 0,
+        events: ['preflight', 'apply'],
+        called: {bq: 0, spanner: 0, sources: 0},
+        warnings: ['Warning: w'],
+        then: [{
+          deployments: [{name: 'g1', profile: 'prod'}],
+          entities:
+              [CUSTOMER, {...CUSTOMER, name: 'Order', source: bqTable('o')}],
+          relationships: [{name: 'refers', from: 'Order', to: 'Customer'}],
+          profiles: {
+            prod: {
+              entities: {...PROD.entities, Order: bqTable('o', 'prod')},
+              relationships: [
+                {name: 'refers', from_columns: ['key'], to_columns: ['key']},
+              ],
+            }
+          },
+          code: 0,
+        }],
+      },
+      {
+        name:
+            '--transpile adds a BIGQUERY dialect entry in the model Knowledge Catalog receives',
+        metrics: [SNOWFLAKE_METRIC],
+        flags: {validateOnly: true},
+        code: 0,
+        warnings: [has('needs transpilation')],
+        check: r => expect(r.published.metrics![0].dialects).toEqual([
+          {
+            dialect: 'SNOWFLAKE',
+            expression: 'SUM(IFF(Customer.key > 0, 1, 0))'
+          },
+        ]),
+        then: [{
+          flags: {validateOnly: true, transpile: true},
+          code: 0,
+          warnings: [TRANSPILE_WARNING],
+          check: r => expect(r.published.metrics![0].dialects).toEqual([
+            {
+              dialect: 'SNOWFLAKE',
+              expression: 'SUM(IFF(Customer.key > 0, 1, 0))'
+            },
+            {
+              dialect: 'BIGQUERY',
+              expression: 'SUM(IF(Customer.key > 0, 1, 0))'
+            },
+          ]),
+        }],
+      },
+      {
+        name: '--validate-only --print prints the catalog plan first',
+        flags: {validateOnly: true, print: true},
+        services: planned(),
+        code: 0,
+        log: [...PLAN, msg.VALIDATED],
+        errors: [],
+        called: {apply: 0},
+      },
+      {
+        name:
+            'a failed catalog preflight under --print still prints the plan and its warnings',
+        flags: {print: true},
+        services: planned(
+            {success: false, details: 'permission denied', warnings: ['w']}),
+        code: 1,
+        log: PLAN,
+        called: {apply: 0},
+        errors: [
+          'Error pushing semantic model to Knowledge Catalog: permission denied',
         ],
-      }},
-      code: 0,
-    }],
-  },
-  {
-    name: '--transpile fills a vendor-only expression in the model Knowledge Catalog receives',
-    metrics: [SNOWFLAKE_METRIC],
-    flags: {validateOnly: true},
-    code: 0,
-    warnings: [has('needs transpilation')],
-    check: r => expect(r.published.metrics![0].expression).toBeUndefined(),
-    then: [{
-      flags: {validateOnly: true, transpile: true},
-      code: 0,
-      warnings: [TRANSPILE_WARNING],
-      check: r => expect(r.published.metrics![0].expression).toBeDefined(),
-    }],
-  },
-  {
-    name: '--validate-only --print prints the catalog plan first',
-    flags: {validateOnly: true, print: true},
-    services: planned(),
-    code: 0, log: [...PLAN, msg.VALIDATED], errors: [], called: {apply: 0},
-  },
-  {
-    name: 'a failed catalog preflight under --print still prints the plan and its warnings',
-    flags: {print: true},
-    services: planned(
-        {success: false, details: 'permission denied', warnings: ['w']}),
-    code: 1, log: PLAN, called: {apply: 0},
-    errors: [
-      'Error pushing semantic model to Knowledge Catalog: permission denied',
+        warnings: ['Warning: w'],
+      },
     ],
-    warnings: ['Warning: w'],
-  },
-], {flags: {deployment: false}});
+    {flags: {deployment: false}});
 
 // The error the runtime gives when it opens scope `s`.
 async function runtimeError(s: Scope): Promise<string|undefined> {

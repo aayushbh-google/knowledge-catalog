@@ -1960,6 +1960,20 @@ semantic_model:
         authoredEntity: 'orders',
         dialects: [{dialect: 'POSTGRES', expression: 'SUM("orders"."net_amount")'}],
       })).toContain("targets a BigQuery graph with only a 'POSTGRES' expression");
+
+      // A vendor-only metric translated by --transpile (which appends a
+      // BIGQUERY entry to `dialects` and leaves `expression` unset) passes.
+      expect(bqPush([orders()], {
+        name: 'sf_rev',
+        importedExpression: 'SUM("orders"."net_amount")',
+        importedDialect: 'SNOWFLAKE',
+        entity: 'orders',
+        authoredEntity: 'orders',
+        dialects: [
+          {dialect: 'SNOWFLAKE', expression: 'SUM("orders"."net_amount")'},
+          {dialect: 'BIGQUERY', expression: 'SUM(`orders`.`net_amount`)'},
+        ],
+      })).toBe('');
     });
 
     test('the BigQuery placement error offers the anchor the flavor writes', () => {
@@ -3198,33 +3212,59 @@ ${extra}`);
     const leaf = `      - { name: leaf, extends: [e], source: ${SPANNER_TABLE},
           primary_key: [id], fields: [{ name: id, expression: id }] }\n`;
     const alloyDb = `${TARGET.alloydb}/schemas/s/tables/t`;
-    const cases: Array<[source: string, expression: string, extra: string,
-                        errors: string[], transpiled?: boolean]> = [
-      [SPANNER_TABLE, bigQueryText, '', [MISSING('e', 'SPANNER')]],
-      [SPANNER_TABLE, dialects('SPANNER'), '', []],
-      [SPANNER_TABLE, dialects('BIGQUERY', 'ANSI_SQL'), '', []],
-      [SPANNER_TABLE, 'x', '', []],
-      [BQ_TABLE('t'), bigQueryText, other, [MISSING('other', 'SPANNER')]],
-      [BQ_TABLE('t'), bigQueryText, leaf, [MISSING('leaf', 'SPANNER')]],
-      [BQ_TABLE('t'), dialects('SNOWFLAKE'), other,
-       [MISSING('e', 'BIGQUERY', HINT), MISSING('other', 'SPANNER')]],
-      // The message reads "an" before a dialect that starts with a vowel.
-      [alloyDb, bigQueryText, '', [MISSING('e', 'ALLOYDB', '', 'an')]],
-      // With --transpile, push translates a Snowflake text into BigQuery SQL.
-      // It translates no Spanner or AlloyDB text.
-      [BQ_TABLE('t'), dialects('SNOWFLAKE'), '', [MISSING('e', 'BIGQUERY', HINT)]],
-      [BQ_TABLE('t'), dialects('SNOWFLAKE'), '', [], true],
-      [SPANNER_TABLE, dialects('SNOWFLAKE'), '', [MISSING('e', 'SPANNER')], true],
-      [BQ_TABLE('t'), dialects('SPANNER'), '', [MISSING('e', 'BIGQUERY')]],
-      [BQ_TABLE('t'), dialects('SPANNER'), '', [MISSING('e', 'BIGQUERY')], true],
-      [BQ_TABLE('t'), dialects('ALLOYDB'), '', [MISSING('e', 'BIGQUERY')]],
-      [BQ_TABLE('t'), dialects('ALLOYDB'), '', [MISSING('e', 'BIGQUERY')], true],
-    ];
+    const cases: Array<[
+      source: string, expression: string, extra: string, errors: string[],
+      transpiled?: boolean
+    ]> =
+        [
+          [SPANNER_TABLE, bigQueryText, '', [MISSING('e', 'SPANNER')]],
+          [SPANNER_TABLE, dialects('SPANNER'), '', []],
+          [SPANNER_TABLE, dialects('BIGQUERY', 'ANSI_SQL'), '', []],
+          [SPANNER_TABLE, 'x', '', []],
+          [BQ_TABLE('t'), bigQueryText, other, [MISSING('other', 'SPANNER')]],
+          [BQ_TABLE('t'), bigQueryText, leaf, [MISSING('leaf', 'SPANNER')]],
+          [
+            BQ_TABLE('t'), dialects('SNOWFLAKE'), other,
+            [MISSING('e', 'BIGQUERY', HINT), MISSING('other', 'SPANNER')]
+          ],
+          // The message reads "an" before a dialect that starts with a vowel.
+          [alloyDb, bigQueryText, '', [MISSING('e', 'ALLOYDB', '', 'an')]],
+          // With --transpile, push translates a Snowflake, Spanner or AlloyDB
+          // text into BigQuery SQL. An unsupported dialect is not translated.
+          [
+            BQ_TABLE('t'), dialects('SNOWFLAKE'), '',
+            [MISSING('e', 'BIGQUERY', HINT)]
+          ],
+          [BQ_TABLE('t'), dialects('SNOWFLAKE'), '', [], true],
+          [
+            SPANNER_TABLE, dialects('SNOWFLAKE'), '', [MISSING('e', 'SPANNER')],
+            true
+          ],
+          [
+            BQ_TABLE('t'), dialects('SPANNER'), '',
+            [MISSING('e', 'BIGQUERY', HINT)]
+          ],
+          [BQ_TABLE('t'), dialects('SPANNER'), '', [], true],
+          [
+            BQ_TABLE('t'), dialects('ALLOYDB'), '',
+            [MISSING('e', 'BIGQUERY', HINT)]
+          ],
+          [BQ_TABLE('t'), dialects('ALLOYDB'), '', [], true],
+        ];
     for (const [source, expression, extra, errors, transpiled] of cases) {
       const actual = check(withField(source, expression, extra), transpiled);
       expect({source, expression, extra, transpiled, errors: actual})
           .toEqual({source, expression, extra, transpiled, errors});
     }
+    // An unsupported dialect on an in-memory model is not translated.
+    const unsupported = withField(BQ_TABLE('t'), dialects('SNOWFLAKE'));
+    unsupported.entities[0].fields[1] = {
+      name: 'f',
+      importedExpression: 'x',
+      importedDialect: 'TERADATA',
+    };
+    expect(check(unsupported)).toEqual([MISSING('e', 'BIGQUERY')]);
+    expect(check(unsupported, true)).toEqual([MISSING('e', 'BIGQUERY')]);
     // An unbound field and an entity with no source are skipped.
     const unbound = withField(SPANNER_TABLE, bigQueryText);
     unbound.entities[0].fields[1] = {name: 'f'};

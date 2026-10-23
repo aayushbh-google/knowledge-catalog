@@ -2610,7 +2610,18 @@ semantic_model:
     expect(prints(console.warn)).toContain(
         "Warning: [commerce] metric 'positive_spend': transpiled " +
         "'SNOWFLAKE' -> 'BIGQUERY'");
-    expect(metric().expression).toBeDefined();
+    expect(metric().expression).toBeUndefined();
+    expect(metric().dialects).toEqual([
+      {
+        dialect: 'SNOWFLAKE',
+        expression: 'SUM(IFF(purchase.amount > 0, purchase.amount, 0))',
+      },
+      {
+        dialect: 'BIGQUERY',
+        expression: 'SUM(IF(purchase.amount > 0, purchase.amount, 0))',
+      },
+    ]);
+    expect(metric().stringForm).toBe(false);
   });
 
   // Two deployments stop the push after pruning, before any live check.

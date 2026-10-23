@@ -36,24 +36,87 @@ describe('polyglotTranspiler (mechanism invariants)', () => {
       'degrades to a per-request error (never throws) for an unsupported ' +
           'source dialect',
       async () => {
-        const responses = await polyglotTranspiler(
-            [{id: '0', dialect: 'NOT_A_DIALECT', expression: 'NVL(x, 0)'}],
-            'BIGQUERY');
-        expect(responses.length).toBe(1);
-        expect(responses[0].sql).toBeUndefined();
-        expect(responses[0].error).toBeDefined();
+        for (const unsupported
+                 of ['NOT_A_DIALECT',
+                     'SPARK',
+                     'POSTGRESQL',
+                     'TERADATA',
+                     'PRESTO',
+                     'TRINO',
+                     'DUCKDB',
+                     'REDSHIFT',
+                     'ORACLE',
+                     'TSQL',
+        ]) {
+          const responses = await polyglotTranspiler(
+              [{id: '0', dialect: unsupported, expression: 'NVL(x, 0)'}],
+              'BIGQUERY');
+          expect(responses.length).toBe(1);
+          expect(responses[0].sql).toBeUndefined();
+          expect(responses[0].error)
+              .toContain(`unsupported source dialect '${unsupported}'`);
+        }
       });
 
-  test('does not translate SQL Server text', async () => {
-    // The engine gets common T-SQL forms wrong without an error (a CONVERT
-    // style, DATEDIFF(dd, ...), DATEPART, N'' strings), so SQL Server text is
-    // kept as written rather than translated.
-    const [response] = await polyglotTranspiler(
-        [{id: '0', dialect: 'SQLSERVER', expression: 'ISNULL(x, 0)'}],
-        'BIGQUERY');
-    expect(response.sql).toBeUndefined();
-    expect(response.error).toBeDefined();
-  });
+  test(
+      'translates SPANNER (as BigQuery), ALLOYDB (as PostgreSQL), and ' +
+          'SQLSERVER (as T-SQL)',
+      async () => {
+        const responses = await polyglotTranspiler(
+            [
+              {
+                id: 'spanner',
+                dialect: 'SPANNER',
+                expression: 'IF(orders.s = 1, 1, 0)',
+              },
+              {
+                id: 'alloydb',
+                dialect: 'ALLOYDB',
+                expression: '"orders"."amount"::double precision',
+              },
+              {
+                id: 'sqlserver',
+                dialect: 'SQLSERVER',
+                expression: 'ISNULL([orders].[amount], 0)',
+              },
+            ],
+            'BIGQUERY');
+        const byId = new Map(responses.map(r => [r.id, r]));
+        expect(byId.get('spanner')!.sql).toBe('IF(orders.s = 1, 1, 0)');
+        expect(byId.get('alloydb')!.sql)
+            .toBe('CAST(`orders`.`amount` AS DOUBLE PRECISION)');
+        expect(byId.get('sqlserver')!.sql)
+            .toBe('COALESCE(`orders`.`amount`, 0)');
+      });
+
+  test(
+      'translates double-quoted identifiers in vendor and ANSI_SQL text to ' +
+          'BigQuery backticks while keeping string literals intact',
+      async () => {
+        const responses = await polyglotTranspiler(
+            [
+              {
+                id: 'vendor',
+                dialect: 'SNOWFLAKE',
+                expression: 'SUM("orders"."col")',
+              },
+              {
+                id: 'ansi',
+                dialect: 'ANSI_SQL',
+                expression: '"orders"."col"',
+              },
+              {
+                id: 'lit',
+                dialect: 'ANSI_SQL',
+                expression: `'a "quoted" string'`,
+              },
+            ],
+            'BIGQUERY');
+        const byId = new Map(responses.map(r => [r.id, r]));
+        expect(byId.get('vendor')!.sql).toBe('SUM(`orders`.`col`)');
+        expect(byId.get('ansi')!.sql).toBe('`orders`.`col`');
+        expect(byId.get('lit')!.sql).toBe(`'a "quoted" string'`);
+      });
 
   test(
       'errors every request for an unsupported target dialect rather than ' +
