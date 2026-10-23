@@ -38,7 +38,7 @@ semantic_model:
 
 let dir = '';
 let cwd = '';
-let savedEnv: string|undefined;
+let savedEnv: NodeJS.ProcessEnv = {};
 
 function writeWorkspace(): void {
   fs.writeFileSync(
@@ -53,7 +53,7 @@ beforeEach(() => {
   cwd = process.cwd();
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kcmd-commands-'));
   process.chdir(dir);
-  savedEnv = process.env.KC_V2_ASPECTS;
+  savedEnv = {...process.env};
   delete process.env.KC_V2_ASPECTS;
   spyOn(ApiContext, 'default').mockReturnValue(CTX);
   spyOn(console, 'log').mockImplementation(() => {});
@@ -71,10 +71,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (savedEnv === undefined) {
-    delete process.env.KC_V2_ASPECTS;
-  } else {
-    process.env.KC_V2_ASPECTS = savedEnv;
+  for (const k of ['KC_V2_ASPECTS', 'KC_TYPE_PROJECT']) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
   }
   process.chdir(cwd);
   if (dir) fs.rmSync(dir, {recursive: true, force: true});
@@ -193,9 +192,10 @@ describe('v2Aspects forwarding', () => {
         expect(pullSpy.mock.calls[0][1].v2Aspects).toBe(false);
       });
 
-  test('pull forwards v2Aspects: true when KC_V2_ASPECTS is "1"', async () => {
+  test('pull forwards v2Aspects: true and KC_TYPE_PROJECT', async () => {
     writeWorkspace();
     process.env.KC_V2_ASPECTS = '1';
+    process.env.KC_TYPE_PROJECT = 'types';
     const pullSpy = spyOn(pullKc, 'pullKnowledgeCatalog')
                         .mockResolvedValue({models: [], warnings: []});
 
@@ -204,6 +204,7 @@ describe('v2Aspects forwarding', () => {
     expect(code).toBe(0);
     expect(pullSpy).toHaveBeenCalledTimes(1);
     expect(pullSpy.mock.calls[0][1].v2Aspects).toBe(true);
+    expect(pullSpy.mock.calls[0][1].systemTypeProject).toBe('types');
   });
 });
 
@@ -1576,6 +1577,8 @@ describe('pull with stored file copies', () => {
       'commerce.profiles/prod.yml',
       'commerce.profile.dev.yml',
       'commerce.yml',
+      // Only a second-generation pull writes overview sidecars.
+      'commerce/entities/Customer.overview.md',
     ];
     pulled([...names.map(fileName => ({fileName, content: 'x'})), MODEL_COPY]);
 
@@ -1583,6 +1586,10 @@ describe('pull with stored file copies', () => {
     for (const name of names) {
       expect(messages(warnSpy)).toContain(`skipped '${name}' from the catalog`);
     }
+    expect(messages(warnSpy)).toContain(
+        `pull writes only 'commerce.yaml', 'commerce.profile.<name>.yaml' ` +
+        `and 'commerce.profiles/<name>.yaml' inside the entry group ` +
+        `directory.`);
     expect(fs.existsSync(local('commerce.profiles'))).toBe(false);
     expect(fs.existsSync(local('commerce.yml'))).toBe(false);
   });
@@ -1728,18 +1735,73 @@ describe('pull with stored file copies', () => {
          expect(fs.existsSync(path.join(outside, 'prod.yaml'))).toBe(true);
        });
 
-  test('with KC_V2_ASPECTS on, pull leaves local profile files unnamed',
+  test('with KC_V2_ASPECTS on, a second-generation pull writes the model, ' +
+           'profile and sidecar files and names or deletes stale ones',
        async () => {
          process.env.KC_V2_ASPECTS = '1';
          withStaleProfile();
+         const staleSidecar = 'commerce/metrics/old.overview.md';
+         fs.mkdirSync(path.dirname(local(staleSidecar)), {recursive: true});
+         fs.writeFileSync(local(staleSidecar), 'Old.\n');
          const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
-         spyOn(pullKc, 'pullKnowledgeCatalog')
-             .mockResolvedValue({models: [COMMERCE], warnings: []});
+         const model: SemanticModel = {...COMMERCE, profiles: [{
+           name: 'prod', entities: [], relationships: [], metricsExclude: '*'}],
+           entities: [{
+             name: 'Customer', dataSource: '', keys: [], fields: [{name: 'id'}],
+           }]};
+         const pulled = spyOn(pullKc, 'pullKnowledgeCatalog')
+                            .mockResolvedValue({models: [model], warnings: []});
 
          expect(await pull({forceRemove: true})).toBe(0);
          expect(messages(warnSpy)).not.toContain('profile file');
          expect(fs.existsSync(local('commerce.profile.dev.yaml'))).toBe(true);
-         expect(fs.existsSync(local('commerce.profile.prod.yaml'))).toBe(true);
+         expect(fs.readFileSync(local('commerce.profile.prod.yaml'), 'utf8'))
+             .toBe('name: prod\n');
+
+         const overviews = new Map([
+           ['commerce', {content: '# Commerce\n', contentType: 'HTML',
+                         links: [{url: 'https://x.test'}]}],
+           ['commerce/entities/Customer', {content: 'A buyer.\n'}],
+         ]);
+         pulled.mockResolvedValue(
+             {models: [model], warnings: [], secondGeneration: true, overviews});
+         // The catalog holds no profile's actions, so the local ones stay.
+         const actions = [{name: 'refund', executor: null}];
+         fs.writeFileSync(local('commerce.profile.prod.yaml'),
+                          'name: prod\nactions: [{name: refund, executor: null}]\n');
+         const {files} = osi.serializeModelFiles(
+             {...model, profiles: [{...model.profiles![0], actions}]});
+         warnSpy.mockClear();
+         expect(await pull()).toBe(0);
+         // Sources only in profile files draw no missing-source warning.
+         expect(messages(warnSpy)).not.toMatch(/no source|no expression/);
+         expect(files).toHaveLength(2);
+         for (const [name, text] of [
+                ...files.map(f => [f.fileName, f.content]),
+                ['commerce.overview.md',
+                 '---\ncontentType: HTML\nlinks:\n  - url: https://x.test\n' +
+                     '---\n# Commerce\n'],
+                ['commerce/entities/Customer.overview.md', 'A buyer.\n'],
+              ]) {
+           expect(fs.readFileSync(local(name), 'utf8')).toBe(text);
+         }
+         for (const [kind, name] of [['profile file', 'commerce.profile.dev.yaml'],
+                                     ['overview sidecar', staleSidecar]]) {
+           expect(messages(warnSpy))
+               .toContain(`local ${kind} ${shown(name)} is not in the catalog`);
+           expect(fs.existsSync(local(name))).toBe(true);
+         }
+
+         expect(await pull({forceRemove: true})).toBe(0);
+         expect(fs.existsSync(local('commerce.profile.dev.yaml'))).toBe(false);
+         expect(fs.existsSync(local(staleSidecar))).toBe(false);
+
+         // A vanilla model declares no action, so its profiles get none.
+         pulled.mockResolvedValue({models: [{...model, version: '0.2.0.dev0'}],
+                                   warnings: [], secondGeneration: true});
+         expect(await pull()).toBe(0);
+         expect(fs.readFileSync(local('commerce.yaml'), 'utf8'))
+             .not.toContain('refund');
        });
 });
 

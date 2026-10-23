@@ -546,7 +546,7 @@ function emittedAspectsError(model: EmittedModel): string|undefined {
 }
 
 // Most aspects Dataplex returns for one entry in one read.
-const MAX_ASPECTS_PER_READ = 100;
+export const MAX_ASPECTS_PER_READ = 100;
 
 // The aspect types a field can carry at its path, each with what fills it.
 const FIELD_ASPECT_CONTENT: Record<string, string> = {
